@@ -1,0 +1,8 @@
+.DS_Store
+*.xcuserstate
+xcuserdata/
+build/
+DerivedData/
+
+# Generated from project.yml by `xcodegen generate`.
+*.xcodeproj
