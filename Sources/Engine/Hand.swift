@@ -28,8 +28,11 @@ public enum Combination: Int, Comparable, Hashable, Sendable {
 /// So four aces score `4000 + 400 = 4400`, a pair of aces over a pair of kings
 /// scores `2400 + 400 + 300 = 3100`, and a rainbow A K Q J scores
 /// `40 + 30 + 20 + 10 = 100`. Suits never affect the score.
-public struct Hand: Hashable, Sendable {
+public struct Hand: Sendable {
+    /// The cards as they were dealt.
     public let cards: [Card]
+    /// The same cards, strongest first — the basis for comparing two hands.
+    public let sortedCards: [Card]
 
     /// Ranks appearing two or more times, highest first.
     public let groupedRanks: [Rank]
@@ -42,6 +45,7 @@ public struct Hand: Hashable, Sendable {
     public init(cards: [Card]) {
         precondition(cards.count == 4, "a hand holds exactly 4 cards, got \(cards.count)")
         self.cards = cards
+        self.sortedCards = cards.sorted(by: >)
 
         let counts = Dictionary(grouping: cards, by: \.rank).mapValues(\.count)
         groupedRanks = counts.filter { $0.value > 1 }.keys.sorted(by: >)
@@ -62,17 +66,51 @@ public struct Hand: Hashable, Sendable {
     }
 }
 
+/// Two hands are the same hand when they hold the same cards, whatever order
+/// they were dealt in.
+extension Hand: Hashable {
+    public static func == (lhs: Hand, rhs: Hand) -> Bool {
+        lhs.sortedCards == rhs.sortedCards
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sortedCards)
+    }
+}
+
 extension Hand: Comparable {
-    /// Hands compare by score alone. Equal scores are genuine ties — the spec
-    /// calls this out: two aces with two jacks and two kings with two queens
-    /// both score 2900. `GameEngine` breaks such ties by turn order.
+    /// Hands are ranked on `score` first, so every value in the scoring table
+    /// still decides the round. Score alone leaves ties, though — the spec
+    /// flags one itself (two aces with two jacks and two kings with two queens
+    /// both make 2900), and two players can also hold the same ranks in
+    /// different suits. So equal scores fall through a chain:
+    ///
+    /// 1. `score`
+    /// 2. grouped ranks, highest first — the higher pair wins, settling 2900
+    /// 3. loose ranks, highest first
+    /// 4. the cards themselves, which brings suit order (♠ > ♣ > ♥ > ♦) in
+    ///
+    /// Step 4 cannot tie for two hands out of one deck, so a round always has
+    /// exactly one winner.
     public static func < (lhs: Hand, rhs: Hand) -> Bool {
-        lhs.score < rhs.score
+        if lhs.score != rhs.score { return lhs.score < rhs.score }
+        if let ascending = firstDifference(lhs.groupedRanks, rhs.groupedRanks) { return ascending }
+        if let ascending = firstDifference(lhs.looseRanks, rhs.looseRanks) { return ascending }
+        return firstDifference(lhs.sortedCards, rhs.sortedCards) ?? false
+    }
+
+    /// Whether `lhs` sorts below `rhs` at the first position where the two
+    /// differ, or nil when they match all the way down.
+    private static func firstDifference<T: Comparable>(_ lhs: [T], _ rhs: [T]) -> Bool? {
+        for (left, right) in zip(lhs, rhs) where left != right {
+            return left < right
+        }
+        return lhs.count == rhs.count ? nil : lhs.count < rhs.count
     }
 }
 
 extension Hand: CustomStringConvertible {
     public var description: String {
-        cards.map(\.description).joined(separator: " ") + " = \(score)"
+        sortedCards.map(\.description).joined(separator: " ") + " = \(score)"
     }
 }

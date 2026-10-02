@@ -27,7 +27,7 @@ Tests/                   XCTest suites for the above
 ## The game
 
 Four players, a 16-card deck — A K Q J in each of the four suits — four cards
-each. Suits never affect scoring.
+each.
 
 **Betting.** In turn order, each player either enters the round for a bet or
 withdraws. Bets are multiples of 100 and must raise the standing bet. Turn order
@@ -35,7 +35,8 @@ rotates one seat per round.
 
 **Scoring.** A hand is worth its combination's base value, plus the full rank
 value of every rank it holds two or more of, plus a tenth of the rank value of
-every loose card.
+every loose card. Suits never affect the score — they only settle hands that
+are otherwise identical (♠ > ♣ > ♥ > ♦); see decision 1 below.
 
 | Combination | Base | | Rank | Grouped | Loose |
 |---|---|---|---|---|---|
@@ -65,8 +66,27 @@ two disagreed or stopped short, I picked a reading and wrote a test for it:
 
 1. **Ties.** The spec notes the collision itself — two aces with two jacks and
    two kings with two queens both score 2900 — but the old code resolved it by
-   sorting a `Dictionary`, which is non-deterministic. Now a tie goes to
-   whoever sits earliest in the round's turn order.
+   sorting a `Dictionary`, which is non-deterministic.
+
+   The cause is that rank values are linear, so `A + J = 500 = K + Q`. Across
+   all 1820 possible hands that is the *only* score reachable by two different
+   rank shapes; separately, 29 of the 34 possible scores can be reached with
+   different suits, so two players can tie that way too. Measured over 400k
+   four-player deals, the top score was tied in **3.34%** of them — 1.60% the
+   2900 case, 1.74% same ranks in different suits.
+
+   Rather than change the scoring table, `Hand` is now `Comparable` through a
+   chain, with `score` unchanged at the top of it:
+
+   1. `score` — every value in the table still decides the round
+   2. grouped ranks, highest first — the higher pair wins, settling 2900
+   3. loose ranks, highest first
+   4. the cards themselves, bringing suit order **♠ > ♣ > ♥ > ♦**
+
+   Step 4 cannot tie for two hands from one deck, so a round always has exactly
+   one winner and seat position never decides anything. `Hand`'s ordering is
+   tested as a total order over all 1820 hands, and separately for never
+   contradicting the score.
 2. **Paying for an accepted offer.** The old code had `// subtract the offer`
    as a TODO and never moved the coins. The spec's wording ("the coins only go
    to the offer Providers if the top bettor wins") reads backwards for a
@@ -108,7 +128,7 @@ xcodegen generate
 xcodebuild test -scheme CardGame -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
-75 tests, all passing, in under a tenth of a second — the engine has no UIKit
+84 tests, all passing, in under two tenths of a second — the engine has no UIKit
 or SwiftUI in it, so the suite is pure computation.
 
 `project.yml` is the source of truth for the project file — add files to

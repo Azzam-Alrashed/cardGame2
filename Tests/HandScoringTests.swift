@@ -33,15 +33,14 @@ final class HandScoringTests: XCTestCase {
         XCTAssertEqual(hand([(.queen, .spades), (.queen, .clubs), (.jack, .hearts), (.jack, .diamonds)]).score, 2700)
     }
 
-    /// The spec flags this collision explicitly: aces-and-jacks ties with
-    /// kings-and-queens.
+    /// The spec flags this collision explicitly: aces-and-jacks scores the
+    /// same as kings-and-queens. The scores still tie — that is the scoring
+    /// table — and `HandOrderingTests` covers how the round is decided.
     func testTwoPairTieFromTheSpec() {
         let acesAndJacks = hand([(.ace, .spades), (.ace, .clubs), (.jack, .hearts), (.jack, .diamonds)])
         let kingsAndQueens = hand([(.king, .spades), (.king, .clubs), (.queen, .hearts), (.queen, .diamonds)])
         XCTAssertEqual(acesAndJacks.score, 2900)
         XCTAssertEqual(kingsAndQueens.score, 2900)
-        XCTAssertFalse(acesAndJacks < kingsAndQueens)
-        XCTAssertFalse(kingsAndQueens < acesAndJacks)
     }
 
     func testOnePairPlusTwoLooseCards() {
@@ -94,5 +93,106 @@ final class HandScoringTests: XCTestCase {
             }
         }
         XCTAssertEqual(seen, 1820) // C(16,4)
+    }
+}
+
+/// The tiebreak chain: score, then grouped ranks, then loose ranks, then the
+/// cards themselves with suit order ♠ > ♣ > ♥ > ♦.
+final class HandOrderingTests: XCTestCase {
+
+    private func hand(_ cards: [(Rank, Suit)]) -> Hand {
+        Hand(cards: cards.map { Card($0.0, $0.1) })
+    }
+
+    func testSuitOrder() {
+        XCTAssertGreaterThan(Suit.spades, Suit.clubs)
+        XCTAssertGreaterThan(Suit.clubs, Suit.hearts)
+        XCTAssertGreaterThan(Suit.hearts, Suit.diamonds)
+        XCTAssertEqual(Suit.allCases.sorted(by: >), [.spades, .clubs, .hearts, .diamonds])
+    }
+
+    func testCardsOrderByRankThenSuit() {
+        XCTAssertGreaterThan(Card(.ace, .diamonds), Card(.king, .spades), "rank outranks suit")
+        XCTAssertGreaterThan(Card(.ace, .spades), Card(.ace, .clubs), "suit settles equal ranks")
+    }
+
+    /// The collision the spec called out: both hands score 2900, and the
+    /// higher pair now takes it.
+    func testAcesAndJacksBeatsKingsAndQueens() {
+        let acesAndJacks = hand([(.ace, .spades), (.ace, .clubs), (.jack, .hearts), (.jack, .diamonds)])
+        let kingsAndQueens = hand([(.king, .spades), (.king, .clubs), (.queen, .hearts), (.queen, .diamonds)])
+
+        XCTAssertEqual(acesAndJacks.score, kingsAndQueens.score, "the scores still tie")
+        XCTAssertGreaterThan(acesAndJacks, kingsAndQueens, "but the hand with aces wins")
+    }
+
+    func testSuitSettlesHandsWithTheSameRanks() {
+        let spadeHigh = hand([(.ace, .spades), (.ace, .hearts), (.king, .spades), (.queen, .spades)])
+        let clubHigh = hand([(.ace, .clubs), (.ace, .diamonds), (.king, .clubs), (.queen, .clubs)])
+
+        XCTAssertEqual(spadeHigh.score, clubHigh.score)
+        XCTAssertGreaterThan(spadeHigh, clubHigh, "the ace of spades carries it")
+    }
+
+    func testLooseRanksBreakTiesBeforeSuitsDo() {
+        // Both are a pair of queens; the loose cards decide first.
+        let withAce = hand([(.queen, .spades), (.queen, .clubs), (.ace, .diamonds), (.jack, .diamonds)])
+        let withKing = hand([(.queen, .hearts), (.queen, .diamonds), (.king, .diamonds), (.jack, .spades)])
+        XCTAssertGreaterThan(withAce, withKing)
+    }
+
+    func testScoreStillDecidesWheneverItDiffers() {
+        // Nothing in the chain may override the scoring table: scan every
+        // possible pair of hands that can be dealt from one deck.
+        let deck = Deck.all
+        var checked = 0
+        for i in 0..<deck.count {
+            for j in (i + 1)..<deck.count {
+                for k in (j + 1)..<deck.count {
+                    for l in (k + 1)..<deck.count {
+                        let left = Hand(cards: [deck[i], deck[j], deck[k], deck[l]])
+                        let remaining = deck.filter { !left.cards.contains($0) }
+                        let right = Hand(cards: Array(remaining.prefix(4)))
+                        if left.score != right.score {
+                            XCTAssertEqual(left < right, left.score < right.score)
+                            checked += 1
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(checked, 1000)
+    }
+
+    func testOrderingIsConsistentWithEquality() {
+        let dealtOneWay = hand([(.ace, .spades), (.king, .clubs), (.queen, .hearts), (.jack, .diamonds)])
+        let dealtAnother = hand([(.jack, .diamonds), (.queen, .hearts), (.ace, .spades), (.king, .clubs)])
+
+        XCTAssertEqual(dealtOneWay, dealtAnother, "the same cards are the same hand")
+        XCTAssertFalse(dealtOneWay < dealtAnother)
+        XCTAssertFalse(dealtAnother < dealtOneWay)
+        XCTAssertEqual(dealtOneWay.hashValue, dealtAnother.hashValue)
+    }
+
+    func testSortingIsATotalOrderOverEveryHand() {
+        let deck = Deck.all
+        var hands: [Hand] = []
+        for i in 0..<deck.count {
+            for j in (i + 1)..<deck.count {
+                for k in (j + 1)..<deck.count {
+                    for l in (k + 1)..<deck.count {
+                        hands.append(Hand(cards: [deck[i], deck[j], deck[k], deck[l]]))
+                    }
+                }
+            }
+        }
+        let sorted = hands.sorted()
+        XCTAssertEqual(sorted.count, 1820)
+        // Strictly increasing: adjacent hands never compare equal.
+        for (lower, higher) in zip(sorted, sorted.dropFirst()) {
+            XCTAssertTrue(lower < higher, "\(lower) and \(higher) are not ordered")
+        }
+        XCTAssertEqual(sorted.last?.score, 4400, "four aces is still the best hand")
+        XCTAssertEqual(sorted.first?.score, 100, "a rainbow is still the worst")
     }
 }

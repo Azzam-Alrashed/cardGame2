@@ -401,6 +401,29 @@ final class GameEngineTests: XCTestCase {
         XCTAssertEqual(outcome.revealedHands.count, 2, "only entrants are revealed")
     }
 
+    /// Entrants whose scores tie are now separated by the hand itself, not by
+    /// where they happen to sit.
+    func testATiedScoreIsSettledByTheHandNotTheSeat() throws {
+        for seed in UInt64(0)..<400 {
+            var engine = makeEngine(seed: seed)
+            try engine.startRound()
+            try engine.bet(100, from: a)
+            try engine.bet(200, from: b)
+            try engine.withdraw(c)
+            try engine.withdraw(d)
+
+            let handA = engine.participation[a]!.hand
+            let handB = engine.participation[b]!.hand
+            guard handA.score == handB.score else { continue }
+
+            let outcome = try engine.endRound()
+            let expected = handA > handB ? a : b
+            XCTAssertEqual(outcome.winner, expected, "the stronger hand must take a tied score")
+            return
+        }
+        XCTFail("no seed in range dealt two entrants the same score")
+    }
+
     func testOnlyEntrantsAreRevealed() throws {
         var engine = makeEngine()
         try engine.startRound()

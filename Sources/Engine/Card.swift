@@ -28,6 +28,23 @@ public enum Suit: String, CaseIterable, Hashable, Sendable {
         case .diamonds: return "♦"
         }
     }
+
+    /// Suits never contribute to a hand's score — this only settles hands that
+    /// are otherwise identical. ♠ > ♣ > ♥ > ♦.
+    public var strength: Int {
+        switch self {
+        case .spades: return 4
+        case .clubs: return 3
+        case .hearts: return 2
+        case .diamonds: return 1
+        }
+    }
+}
+
+extension Suit: Comparable {
+    public static func < (lhs: Suit, rhs: Suit) -> Bool {
+        lhs.strength < rhs.strength
+    }
 }
 
 public struct Card: Hashable, Identifiable, Sendable {
@@ -43,6 +60,13 @@ public struct Card: Hashable, Identifiable, Sendable {
 
     /// Asset-catalog name for this card's face, e.g. `ace_spades`.
     public var imageName: String { "\(rank)_\(suit.rawValue)" }
+}
+
+/// Cards order by rank, then by suit for cards of the same rank.
+extension Card: Comparable {
+    public static func < (lhs: Card, rhs: Card) -> Bool {
+        lhs.rank != rhs.rank ? lhs.rank < rhs.rank : lhs.suit < rhs.suit
+    }
 }
 
 extension Card: CustomStringConvertible {

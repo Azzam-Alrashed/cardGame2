@@ -207,9 +207,10 @@ public struct GameEngine: Sendable {
 
     /// Scores the round without mutating anything.
     ///
-    /// Hands are compared on score alone; a tie goes to whoever sits earliest
-    /// in this round's turn order. Losing entrants always pay the bet they
-    /// placed; what the winner collects depends on `payout`.
+    /// Hands are compared in full — score, then the tiebreak chain down to
+    /// suit order — so one entrant always comes out strictly ahead. Losing
+    /// entrants pay the bet they placed; what the winner collects depends on
+    /// `payout`.
     private func settle() -> RoundOutcome {
         let contenders = entrants
         guard !contenders.isEmpty else {
@@ -221,10 +222,12 @@ public struct GameEngine: Sendable {
             if let hand = participation[id]?.hand { hands[id] = hand }
         }
 
-        // `contenders` is already in turn order, so max(by: <) keeps the
-        // earliest seat on a tie.
+        // `Hand`'s ordering is total, so this is the one strongest hand. The
+        // turn-order traversal only matters if a hand were somehow missing.
         let winner = contenders.max { lhs, rhs in
-            (hands[lhs]?.score ?? 0) < (hands[rhs]?.score ?? 0)
+            guard let left = hands[lhs] else { return true }
+            guard let right = hands[rhs] else { return false }
+            return left < right
         }
 
         var changes: [PlayerID: Int] = [:]
