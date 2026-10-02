@@ -2,9 +2,14 @@
 
 A SwiftUI rebuild of [cardsGame](https://github.com/azzam-dev) (2020, UIKit + storyboards).
 
-This pass is **engine only** — the rules live in plain Swift value types with no
-UIKit, no views and no timers, so they can be unit-tested on their own. The
-table UI comes next.
+> **The rules below are superseded.** [`SPEC.md`](SPEC.md) is the authoritative
+> specification: one 52-card deck, up to 13 players, combination-based hand
+> comparison and no-pot settlement. The engine described here still implements
+> the old 16-card, four-player rules and has not been rewritten yet.
+
+The rules live in plain Swift value types with no UIKit, no views and no
+timers, so they can be unit-tested on their own. On top of that sits a SwiftUI
+table you can play a full round on against three AI opponents.
 
 ## Layout
 
@@ -19,7 +24,16 @@ Sources/Engine/          the game, as pure Swift
   GameEngine.swift       the round state machine and settlement
   AIStrategy.swift       hand-strength-driven opponents
   RandomGenerator.swift  seedable RNG so games replay
-Sources/App/             a scaffold view that plays a round to stdout-ish
+Sources/App/
+  GameTableViewModel.swift  owns the engine, plays the AI seats, holds
+                            presentation state; round flow reads as awaits
+  Views/GameTableView.swift the table: four seats, deck, controls, dial
+  Views/SeatView.swift      a seat's fan of cards along its own edge
+  Views/CardView.swift      one card, face up or down, at the art's 2:3
+  Views/TableControls.swift bet/offer pickers, offer rulings, round summary
+  Views/RadialNavButton.swift the drag-out dial, with its geometry extracted
+  Views/TablePanel.swift    offers, leaderboard and round-info panels
+  Views/BetBubbleView.swift bet bubbles and player badges
 Resources/Assets.xcassets  art carried over from the old project
 Tests/                   XCTest suites for the above
 ```
@@ -128,14 +142,45 @@ xcodegen generate
 xcodebuild test -scheme CardGame -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
 
-84 tests, all passing, in under two tenths of a second — the engine has no UIKit
-or SwiftUI in it, so the suite is pure computation.
+97 tests, all passing, in under two tenths of a second. The engine has no UIKit
+or SwiftUI in it, and the view model takes its animation timings as a
+parameter, so tests pass `.immediate` and a round resolves as fast as the
+engine can score it.
 
 `project.yml` is the source of truth for the project file — add files to
 `Sources/` or `Tests/` and re-run `xcodegen generate`.
 
-## Not built yet
+## The table
 
-The table, bet bubbles, card-throw animations, leaderboard, settings, offers
-list, chat and the draggable radial home button — all still to come, on top of
-this engine.
+Landscape, four seats round the edges, playable end to end: deal, bet or
+withdraw, watch the AI act, negotiate, reveal, settle, next round.
+
+A few notes on how it differs from the original:
+
+- **The round is a sequence of `await`s**, not a chain of
+  `DispatchQueue.main.asyncAfter` calls hung off animation completion
+  handlers. `GameTableViewModel.advance()` plays AI seats until it reaches the
+  human, then simply returns — the human's turn is where the driver stops.
+- **A seat is one view.** The old controller moved four image views per player
+  through four constraint outlets each (sixteen outlets, four copies of the
+  same animation). `SeatHandView` knows which edge it sits on and derives the
+  rest.
+- **The human has no seat badge** — their name and purse ride in the control
+  bar, which already owns that edge of the table.
+- **Bets are a row of chips**, not a `UIPickerView`. In landscape a row reads
+  better than a wheel and both ends of the range are one tap away.
+- **The radial home button is still there**: press and drag out of the dot,
+  the dial blooms, drop on a destination. Its geometry lives in `RadialDial`,
+  away from the view, so the drop logic is unit-tested.
+
+### Known gaps
+
+- Drag-to-drop on the dial is implemented and its geometry is tested, but the
+  gesture could not be exercised in the simulator: with the device held
+  portrait and the app locked to landscape, the dot lands in iOS's own
+  Notification Center zone and the system swallows the drag. Tapping a
+  destination works, and this wants a check on a real device held landscape.
+- No chat, no voice recording, no sound, no settings beyond the round-info
+  panel.
+- The deal animation staggers cards into each hand but does not yet throw them
+  from the centre of the table the way the original did.
