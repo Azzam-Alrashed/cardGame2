@@ -1,9 +1,13 @@
 import SwiftUI
 
-/// The table: four seats round the edges, the deck in the middle, the human's
+/// The table: seats round the edges, the deck in the middle, the human's
 /// controls at the bottom and the radial dial in the corner.
 struct GameTableView: View {
     @State private var model = GameTableViewModel()
+
+    private var layout: TableLayout {
+        TableLayout(seats: model.seats, humanSeat: model.humanSeat)
+    }
 
     var body: some View {
         ZStack {
@@ -15,7 +19,7 @@ struct GameTableView: View {
                 ZStack {
                     deck(in: geometry.size)
 
-                    ForEach(Seat.allCases, id: \.self) { seat in
+                    ForEach(model.seats) { seat in
                         seatLayer(seat, in: geometry.size)
                     }
 
@@ -63,29 +67,46 @@ struct GameTableView: View {
         let cardWidth: CGFloat = isHuman ? 76 : 52
 
         SeatHandView(
-            seat: seat,
             hand: model.hand(at: seat),
             dealtCards: model.dealtCards[seat] ?? 0,
             faceUp: model.showsFaces(at: seat),
             hasFolded: model.foldedSeats.contains(seat),
+            rotation: layout.cardRotation(of: seat),
+            dealEdge: layout.dealEdge(of: seat),
             cardWidth: cardWidth
         )
         .position(handPosition(seat, in: size, cardWidth: cardWidth))
 
-        if let player = model.player(at: seat), seat != model.humanSeat {
+        if let player = model.player(at: seat), !isHuman {
             PlayerBadgeView(
                 player: player,
                 isActive: model.isTurn(of: seat),
                 hasTopBet: model.isTopBettor(seat)
             )
-            .position(badgePosition(seat, in: size))
+            .position(layout.position(of: seat, in: size, inset: 96, pull: 0.74))
         }
 
         if let bet = model.bubbles[seat] {
-            BetBubbleView(seat: seat, amount: bet)
-                .position(bubblePosition(seat, in: size))
+            BetBubbleView(amount: bet, imageName: layout.bubbleImageName(of: seat))
+                .position(layout.position(of: seat, in: size, inset: 96, pull: 0.44))
         }
     }
+
+    /// The near seat's fan is held clear of the control bar; every other seat
+    /// sits on the table's ellipse.
+    private func handPosition(_ seat: Seat, in size: CGSize, cardWidth: CGFloat) -> CGPoint {
+        guard seat == model.humanSeat else {
+            return layout.position(of: seat, in: size, inset: cardWidth * 0.9)
+        }
+        return layout.nearSeatPosition(
+            in: size,
+            cardWidth: cardWidth,
+            reservedTrailingWidth: Self.controlsWidth + 16
+        )
+    }
+
+    /// Matches the frame the control bar is given below.
+    private static let controlsWidth: CGFloat = 400
 
     /// Landscape leaves about 400pt of height, so the controls take the
     /// bottom-trailing corner rather than the full width — otherwise they sit
@@ -96,7 +117,7 @@ struct GameTableView: View {
             HStack {
                 Spacer()
                 TableControls(model: model)
-                    .frame(maxWidth: 360)
+                    .frame(maxWidth: Self.controlsWidth)
             }
         }
     }
@@ -125,45 +146,6 @@ struct GameTableView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: model.openPanel)
-        }
-    }
-
-    // MARK: - Geometry
-    //
-    // Seats sit just inside their own edge. The human's hand is pulled a
-    // little further in so the controls do not cover it.
-
-    /// Hands hug their own edge. The human's sits left of centre so the
-    /// controls in the opposite corner never cover it.
-    private func handPosition(_ seat: Seat, in size: CGSize, cardWidth: CGFloat) -> CGPoint {
-        let edge = cardWidth * 0.72
-        switch seat {
-        // A little further in, so the fan's corners clear the bottom edge.
-        case .south: return CGPoint(x: size.width * 0.43, y: size.height - cardWidth * 0.95)
-        case .north: return CGPoint(x: size.width / 2, y: edge + 8)
-        case .east: return CGPoint(x: size.width - edge, y: size.height / 2)
-        case .west: return CGPoint(x: edge, y: size.height / 2)
-        }
-    }
-
-    /// Each badge sits on the table-centre side of its own cards. The human
-    /// has none — their purse rides in the control bar instead.
-    private func badgePosition(_ seat: Seat, in size: CGSize) -> CGPoint {
-        switch seat {
-        case .south: return CGPoint(x: size.width / 2, y: size.height - 24)
-        case .north: return CGPoint(x: size.width / 2, y: 124)
-        case .east: return CGPoint(x: size.width - 150, y: size.height / 2)
-        case .west: return CGPoint(x: 150, y: size.height / 2)
-        }
-    }
-
-    /// Bubbles sit beside their seat, clear of the badges.
-    private func bubblePosition(_ seat: Seat, in size: CGSize) -> CGPoint {
-        switch seat {
-        case .south: return CGPoint(x: size.width * 0.43 - 180, y: size.height - 96)
-        case .north: return CGPoint(x: size.width / 2 + 190, y: 56)
-        case .east: return CGPoint(x: size.width - 150, y: size.height / 2 - 88)
-        case .west: return CGPoint(x: 150, y: size.height / 2 - 88)
         }
     }
 }

@@ -53,19 +53,26 @@ struct TablePanel: View {
         ScrollView {
             VStack(spacing: 8) {
                 if model.engine.offers.isEmpty {
-                    emptyNote("No offers this round")
+                    emptyNote("No Sharah offers this round")
                 } else {
                     ForEach(model.engine.offers) { offer in
-                        HStack(spacing: 10) {
-                            Text(model.engine.players[offer.sender]?.name ?? "—")
-                                .font(.system(size: 13, weight: .semibold))
-                            Spacer()
-                            Text(offer.coins, format: .number)
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .monospacedDigit()
-                            Text(offer.resolution?.rawValue.capitalized ?? "Pending")
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(name(offer.from))
+                                    .font(.system(size: 13, weight: .semibold))
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.white.opacity(0.5))
+                                Text(name(offer.to))
+                                    .font(.system(size: 13, weight: .semibold))
+                                Spacer()
+                                Text(offer.amount, format: .number)
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .monospacedDigit()
+                            }
+                            Text(offer.state.rawValue.capitalized)
                                 .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(color(for: offer.resolution))
+                                .foregroundStyle(color(for: offer.state))
                         }
                         .foregroundStyle(.white)
                         .padding(.horizontal, 12)
@@ -76,6 +83,10 @@ struct TablePanel: View {
             }
             .padding(14)
         }
+    }
+
+    private func name(_ id: PlayerID) -> String {
+        model.engine.players[id]?.name ?? "—"
     }
 
     private var leaderboard: some View {
@@ -97,7 +108,7 @@ struct TablePanel: View {
                                 .foregroundStyle(.white.opacity(0.5))
                         }
                         Spacer()
-                        Text(player.coins, format: .number)
+                        Text(player.balance, format: .number)
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .monospacedDigit()
                     }
@@ -116,11 +127,14 @@ struct TablePanel: View {
 
     private var info: some View {
         VStack(alignment: .leading, spacing: 12) {
+            row("State", model.engine.phase.name)
             row("Round", "\(model.engine.roundIndex + 1)")
-            row("Leads", model.engine.turnOrder.first?.label ?? "—")
-            row("Top bet", model.engine.highestBet == 0 ? "—" : "\(model.engine.highestBet)")
-            row("Payout", model.engine.payout == .conserving ? "Conserving" : "Top bet to winner")
-            row("Tiebreak", "Rank, then ♠ ♣ ♥ ♦")
+            row("Leads", model.engine.turnOrder.first.map(name) ?? "—")
+            row("Highest bet", model.engine.highestBet == 0 ? "—" : model.engine.highestBet.formatted())
+            row("Minimum bet", GameRules.minimumBet.formatted())
+            row("Target", GameRules.targetBalance.formatted())
+            row("Undealt cards", "\(model.engine.undealtCards)")
+            row("Tiebreak", "Rank only — ties split")
 
             if let hand = model.hand(at: model.humanSeat) {
                 Divider().overlay(.white.opacity(0.15))
@@ -130,7 +144,7 @@ struct TablePanel: View {
                 Text(hand.description)
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white)
-                Text(combinationName(hand.combination))
+                Text(hand.ranking.description)
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.6))
             }
@@ -173,21 +187,11 @@ struct TablePanel: View {
         }
     }
 
-    private func color(for resolution: Offer.Resolution?) -> Color {
-        switch resolution {
+    private func color(for state: SharahOffer.State) -> Color {
+        switch state {
         case .accepted: return .green
         case .rejected: return .red
-        case nil: return .yellow
-        }
-    }
-
-    private func combinationName(_ combination: Combination) -> String {
-        switch combination {
-        case .fourOfAKind: return "Four of a kind"
-        case .threeOfAKind: return "Three of a kind"
-        case .twoPair: return "Two pair"
-        case .pair: return "Pair"
-        case .none: return "Rainbow"
+        case .pending: return .yellow
         }
     }
 }

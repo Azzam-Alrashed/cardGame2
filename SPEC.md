@@ -1,12 +1,12 @@
 # Game Specification
 
-Authoritative rules for the game. Where this document and `README.md` disagree,
-this document wins — the README describes the superseded 16-card engine that is
-currently in `Sources/Engine/`.
+Authoritative rules for the game. The engine in `Sources/Engine/` implements
+this document; where code and this document disagree, this document wins.
 
-Status key: **LOCKED** rules are settled and implementation must match them
-exactly. **OPEN** items are not yet specified and nothing may be built on a
-guess about them.
+Status key: **LOCKED** rules are settled and the implementation matches them
+exactly. **OPEN** items are not specified and nothing is built on a guess about
+them — where an engine cannot avoid taking a position, the position is isolated
+in a policy type and marked here.
 
 Last updated 2026-10-02.
 
@@ -37,17 +37,32 @@ four aces may collect nothing if the table exits cheaply.
 - Ranks: A, K, Q, J, 10, 9, 8, 7, 6, 5, 4, 3, 2.
 - **Suits have zero effect on anything** — not strength, not comparison, not
   ties. There is no trump suit and no suit-based tiebreak. Suits exist only so
-  that four physical copies of each rank exist.
+  that four physical copies of each rank exist, and so the art knows which card
+  to draw.
 - There are no flushes and no straights. Those concepts do not exist in this
   game and must not be introduced.
 
-## 3. Players and deal — LOCKED
+*Implemented by `Card.swift`. `Suit` is deliberately not `Comparable` and holds
+no strength value, so no comparison can reach for one.*
 
-- Each player receives **exactly 4 cards**, dealt once.
+## 3. Players and dealing — LOCKED
+
+- Each active player receives **exactly 4 cards**, dealt once.
 - No draws, no discards, no swaps, no community cards.
 - 4 cards x 13 players = 52, so **13 players is the hard ceiling**.
 - With fewer than 13 players the undealt cards remain in the deck, unseen and
   unused for the round.
+- Cards are dealt **one at a time, right to left**: the round's starting player
+  takes the first card, then the player to their right, four times round.
+- The starting position rotates one seat per round.
+
+**Seat convention.** Seat indices run right to left: the player at seat `i + 1`
+sits to the right of the player at seat `i`, and the last seat sits to the right
+of seat 0. The same order serves the deal and the betting turns, so a round has
+one turn order and nothing has to reconcile two.
+
+*Implemented by `GameRules.seats(for:)`, `GameRules.turnOrder(seats:startingAt:)`
+and `GameEngine.startRound()`.*
 
 ## 4. Information rules — LOCKED
 
@@ -55,12 +70,13 @@ four aces may collect nothing if the table exits cheaply.
 - No player may see another player's cards before the final reveal. No peeking,
   no partial reveals, no showing a single card.
 - Cards become public only at the showdown, and only for players who reach it.
-- A player who leaves the round by accepting a Sharah offer **never reveals
-  their cards** (see §8).
+- A player who leaves by folding or by accepting a Sharah offer **never reveals
+  their cards**, in any phase, ever.
+- No UI, AI, log or network state may expose a hidden hand.
 
-Everyone bets on four cards nobody else has seen. This is what makes bluffing
-real, and it is a hard constraint on every interface built on this engine: no
-view, log, animation or debug output may leak a hand.
+*Enforced structurally: the engine's participation table is private, a hand is
+read through `GameEngine.hand(of:asSeenBy:)`, and an AI is handed only a
+`PublicTableView`, whose opponent hands are nil until a reveal.*
 
 ## 5. Hand classification — LOCKED
 
@@ -118,34 +134,40 @@ The order a hand is held or displayed in is irrelevant; comparison sorts first.
 
 - Suits must never be consulted, at any step, for any reason.
 - No flush, straight, or any other poker hand not listed in §5.
-- The superseded additive `base value + rank points` score must not be used.
-  Comparison is type-first, then rank — never a single number. A strict
-  hierarchy means a pair always beats a worse type regardless of ranks, so the
-  cross-type collisions the old scoring produced cannot occur.
+- **No numeric hand score.** No 4000 / 3000 / 2400 / 2000 / 4400 table, and no
+  single sortable number standing in for a hand. Comparison is type first, then
+  rank, and the comparator is the authority.
 
 ### Reachability notes
 
 With a single deck, two players can never hold the same quad rank (8 cards of
 one rank required) or the same trip rank (6 required). **Four of a kind and
 three of a kind are therefore always decided outright by Step 2**, and the trips
-kicker branch is unreachable. It is specified anyway so the rule is total.
+kicker branch is unreachable. It is specified and implemented anyway so the
+comparator is total.
+
+*Implemented by `HandEvaluator` (classification and comparison key) and
+`HandComparator` (the only comparison in the game). `Hand` deliberately does not
+conform to `Comparable`, so nothing can sort hands behind the comparator's back.*
 
 ## 7. True ties — LOCKED
 
 - A **true tie** is two or more hands whose complete rank comparison under §6 is
   identical.
 - **Suits cannot break a tie.** Nothing breaks a tie.
-- All money is **integer only**. There are no fractional units anywhere in the
-  game.
-- Tied winners **split the highest bet amount of the round equally**.
-- If the amount does not divide evenly, the remainder goes to the tied player
-  who comes **first in the current turn order**.
+- All money is **integer only**. There are no fractional units anywhere.
+- Tied winners **split the highest bet of the round equally**, by integer
+  division.
+- The remainder goes to the tied player who comes **first in the current turn
+  order**.
+- The split applies only to the winners' reward. Every losing player still loses
+  exactly their own bet.
 
 ### Examples
 
 - Highest bet 10,000, two tied winners: 5,000 each.
-- Highest bet 10,000, three tied winners: 10,000 = 3 x 3,333 + 1, so the tied
-  player earliest in turn order receives 3,334 and the other two receive 3,333.
+- Highest bet 10,000, three tied winners: 3,334 to the one earliest in turn
+  order, 3,333 to each of the others.
 
 ### Possible tie sizes
 
@@ -161,36 +183,85 @@ Bounded by the four suits per rank:
 
 So a split is 2-, 3- or 4-way, and only the bottom two types can produce one.
 
-## 8. Sharah (negotiation) — PARTIALLY LOCKED
+## 8. Money — LOCKED
 
-Locked:
+- Every player starts the game with **5,000**.
+- Money is **persistent between rounds** and always an **integer**.
+- The **minimum bet is 500**.
+- A player whose balance reaches **0** is **eliminated** and takes no further
+  part in the game.
+- The **target is 100,000**: the first player to reach or exceed it wins the
+  game (§13).
 
-- Sharah is **purely economic**. It has no effect on card strength, on
-  classification or comparison under §6, or on who would have won the showdown.
-- One player offers another player money to **leave the round** instead of
-  continuing to the showdown.
-- A player who **accepts** exits the round: they take no part in the showdown,
-  and **their cards stay hidden permanently** — the table never learns what they
-  held or whether the buy-out was a bargain.
+**Not fully specified — see §15.3.** The rule covers a balance that reaches
+zero *after a loss*. It does not say what happens to a zero balance that arrived
+some other way, such as paying out a Sharah offer. Both readings are implemented
+as `EliminationRule`; the engine has not been given a rule of its own.
 
-Sharah is therefore a way to remove an opponent without beating them, and a way
-to be paid for a hand you would rather not play.
+## 9. Betting — LOCKED
 
-Open — see §11.
+Betting is **a single pass**. In turn order each player acts once, and when the
+last player has acted the committed amounts are final. This is why players reach
+a showdown holding unequal bets, as §11's worked example does, and why folding
+costs nothing — a fold happens before any money is committed.
 
-## 9. Round settlement — LOCKED
+**500 is an increment, not a step limit.** A player may bet **any affordable
+multiple of 500** at or above the amount required to stay in. Nothing caps an
+ordinary bet by the number of players, by what the previous player bet, or by
+anything else.
+
+A player's options, where *required* is the standing bet, or 500 when nobody has
+bet yet:
+
+| Action | Amount | Legal when |
+|---|---|---|
+| Fold | nothing | always |
+| Bet | any multiple of 500 from *required* up to the whole balance | balance ≥ that amount |
+| All-in | the whole balance | balance > 0 |
+
+- Valid amounts: 500, 1,000, 1,500, 2,000, 2,500, 3,000, 5,000, 10,000 …
+- Invalid amounts: 1,100, 1,750, 2,300 — anything that is not a whole 500.
+- A player with 12,000 may bet 10,000 and keep 2,000. A player with 20,000 may
+  bet 10,000 and keep 10,000. Neither is an all-in.
+- **A player does not need enough to match.** All-in is the one action that may
+  commit less than the required amount, and the one amount exempt from the 500
+  rule — a balance need not be a multiple of 500, since a tie remainder can
+  leave an odd one. An all-in below the standing bet does not become the
+  standing bet.
+- An all-in that leaves an odd standing bet rounds the next player's minimum
+  **up** to a whole 500, since every ordinary bet is one.
+- An all-in player who loses reaches 0 and is eliminated.
+- **Bet size is not evidence of strength.** A weak hand may bet aggressively; a
+  strong hand may bet small. Nothing in the engine may treat a bet as a measure
+  of a hand.
+
+*Implemented by `Betting.swift`: `BetAction` (`fold` / `bet(Int)` / `allIn`),
+`BetRange` and `BettingRules`. The range is arithmetic rather than a list, so a
+large stack's hundreds of legal bets cost nothing to validate.*
+
+## 10. Folding — LOCKED
+
+A player who folds:
+
+- commits nothing and loses nothing,
+- takes no part in the showdown and cannot win the round,
+- does not reveal their cards, now or later.
+
+## 11. Round settlement — LOCKED
 
 **There is no pot.** The winner's gain and each loser's loss are independent
 quantities that are never derived from one another.
 
 - The **winner** receives **only the highest bet amount placed by any player in
-  the round**, regardless of what the winner themselves bet.
+  the round**, regardless of what the winner themselves bet, and without their
+  own bet being deducted.
 - Each **losing player** loses **exactly the amount they personally bet**, and
   no more.
-- The losers' bets are **not** summed and awarded to the winner. Do not
-  redistribute them.
-- With multiple tied winners, only the highest bet amount is split between them,
-  per §7.
+- The losers' bets are **not** summed and awarded to the winner.
+- With multiple tied winners, only the highest bet is split between them, per §7.
+- The highest bet of the round counts **whoever placed it, and whether or not
+  they are still in the round at the showdown** — so buying out the top bettor
+  (§12) does not shrink the prize.
 
 ### Worked example
 
@@ -208,7 +279,7 @@ Player A wins the showdown:
 - C loses **4,000**.
 - D loses **10,000**.
 
-### Recorded consequence: the coin supply is not conserved
+### Recorded consequence: the money supply is not conserved
 
 This rule is deliberately not zero-sum, and it drifts in both directions:
 
@@ -217,51 +288,126 @@ This rule is deliberately not zero-sum, and it drifts in both directions:
 - Heads-up, where the winner bet 10,000 and the loser bet 100, the winner gains
   10,000 while only 100 is paid, so 9,900 is created.
 
-This is intended and must be implemented as written. It is recorded here because
-anything later built on a conserved supply — elimination thresholds, a stable
-buy-in, long-session balance — has to account for the drift. The existing
-engine's `.conserving` payout mode is the wrong model for this game and is
-removed.
+This is intended and implemented as written. It is recorded because anything
+built on a conserved supply — elimination thresholds, a stable buy-in,
+long-session balance — has to account for the drift.
 
-## 10. Elimination — CONCEPT ONLY, NOT LOCKED
+*Implemented by `Settlement.swift`, as a pure function of the showdown and the
+round's bets.*
 
-Losses persist between rounds and a player who runs out of money leaves the
-game. The exact threshold and the end-of-game condition are open — see §11.
+## 12. Sharah (negotiation) — LOCKED, except §14.1
 
-## 11. Open — nothing may be built on these yet
+Sharah is a separate economic mechanic. It does **not** change hand strength,
+hand ranking, the comparison in §6, or who would have won the showdown, and it
+never reveals a card.
 
-1. **Betting structure.** How many betting rounds; the enter/withdraw/raise
-   sequence; minimum bet and increment; whether a raise must exceed the standing
-   bet; how a player short of the standing bet is handled; turn order and how it
-   rotates.
-2. **Sharah procedure.** Who may offer to whom (only to the top bettor, or any
-   player to any player); whether offers are public or private; whether they are
-   binding once sent; whether more than one offer may be open at a time; when in
+When a player offers another money to leave the round and the offer is
+**accepted**:
+
+- the accepter **immediately receives** the amount, and the offerer's balance is
+  **immediately reduced** by it,
+- the accepter **leaves the round at once** and takes no part in the showdown,
+- the accepter's **cards stay completely private**, for ever,
+- the accepter's **existing bet is not deducted and not lost** — and not
+  refunded either; it simply stays out of settlement,
+- the payment is **not a bet**: it does not count toward the round's highest bet,
+- the accepter **cannot return** to the round.
+
+A **rejected** offer changes nothing at all.
+
+### Worked example
+
+A bet 1,000. B bet 10,000. B offers A 3,000 and A accepts:
+
+- A receives **+3,000** and does **not** lose their 1,000 bet.
+- B's balance falls by **3,000**.
+- A leaves the round; A's cards are never seen.
+
+**Not specified — see §15.2.** Where the payment comes from when some of the
+payer's balance is already committed to the round is open. Both readings are
+implemented as `SharahFunding`; neither is authoritative.
+
+*Implemented by `Sharah.swift` and `GameEngine.offerSharah` /
+`respondToSharah`. The rules §15.1 leaves open live in `SharahPolicy`, with
+permissive defaults, so pinning one later is a change to that type alone.*
+
+## 13. Game end — LOCKED
+
+After each round, in order:
+
+1. Apply settlement (§11).
+2. Apply elimination — anyone on 0 is out (§8).
+3. If any player has reached 100,000, the game ends and that player wins.
+4. Otherwise deal the next round, if at least two active players remain.
+
+**Not specified — see §15.4.** A tie split can carry two players over the
+target in the same round, which this rule does not cover. Both readings are
+implemented as `TargetTieBreak`; neither is authoritative.
+
+## 14. Round flow — LOCKED
+
+The game is a state machine, and every action belongs to exactly one state.
+Anything out of state is rejected: no betting after the showdown, no Sharah once
+the round is over, no second deal, no access to a hidden hand.
+
+| State | What happens | Actions accepted |
+|---|---|---|
+| `WAITING_FOR_PLAYERS` | no round in progress | `startRound` |
+| `DEALING` | four cards each, one at a time, right to left | `finishDealing` |
+| `PRIVATE_HAND` | everyone has seen their own cards | `beginBetting` |
+| `BETTING` | one pass round the table | fold, bet any legal amount, all-in |
+| `SHARAH` | bets are final; players may offer each other money to leave | offer, accept, reject, `closeNegotiation` |
+| `SHOWDOWN` | remaining hands face up; no money has moved | `settle` |
+| `SETTLEMENT` | the round's money moves | `checkGameEnd` |
+| `NEXT_ROUND` | round complete | `startRound` |
+| `GAME_OVER` | someone reached the target | nothing |
+
+*Implemented by `GamePhase` in `GameState.swift`; `GameEngine.endRound()` runs
+the last three steps in one call for a caller that does not need to stop.*
+
+## 15. Open — nothing is built on these
+
+Each of these is a rule the specification does not settle. None of them is
+decided in the engine: they are fields on `GamePolicy`, with the default noted,
+and the default is a starting point rather than a ruling.
+
+1. **Sharah procedure.** Who may offer to whom (only the top bettor, or any
+   player to any player); whether offers are public or private; whether several
+   may be open at once; whether an offer may be changed or withdrawn; when in
    the round Sharah may happen.
-3. **Sharah payment.** Whether money moves on acceptance or conditionally on the
-   payer's result, and in which direction.
-4. **The top bettor exiting via Sharah.** Settlement in §9 keys off "the highest
-   bet made by any player in the round." If the player who made that bet has
-   left via Sharah, is the figure still their bet, or the highest among the
-   players who actually reach the showdown? This changes payouts directly.
-5. **Elimination and game end.** Out at zero, or at "cannot cover the minimum
-   bet"? Does play continue until one player remains, or for a fixed number of
-   rounds?
-6. **Multiplayer model.** One device with AI opponents, as the old project was,
-   or networked play. This decides whether §4's privacy guarantee is enforced by
-   the UI alone or has to hold across a wire.
+   *`SharahPolicy` — default: any player in the round may offer any other, any
+   number of times, during the `SHARAH` state, with offers public.*
+2. **Where a Sharah payment comes from.** A player's bet is at risk until
+   settlement, so it is not obvious whether it may also be promised as a
+   payment. Capping the offer at the uncommitted balance leaves an all-in player
+   unable to buy anyone out; allowing the whole balance lets a payer who then
+   loses their bet finish the round below zero.
+   *`SharahFunding` — default: `availableBalanceOnly`.*
+3. **Which zero balances eliminate.** §8 covers a zero reached by losing. A
+   zero reached by paying out a Sharah offer is not covered.
+   *`EliminationRule` — default: `anyZeroBalanceAtRoundEnd`.*
+4. **Two players crossing the target at once.** A tie split can do it; §13 names
+   only "the first" to reach 100,000.
+   *`TargetTieBreak` — default: `largerBalance`, then turn order.*
+5. **Multiplayer model.** One device with AI opponents, as built, or networked
+   play. This decides whether §4's privacy guarantee is enforced by one process
+   or has to hold across a wire.
+6. **Table size in play.** The engine seats 2–13. The shipped table seats four.
 
-## 12. Effect on the existing code
+## 16. Module map
 
-`Sources/Engine/` implements the superseded rules and conflicts with this
-specification throughout. Known changes required:
-
-| File | Change |
+| Module | Responsibility |
 |---|---|
-| `Card.swift` | 13 ranks, not 4; a 52-card deck, not 16 |
-| `Hand.swift` | additive scoring removed; replaced by §5 classification and §6 type-then-rank comparison |
-| `Player.swift` | up to 13 seats, not exactly 4 |
-| `GameRules.swift` | `.conserving` payout removed; settlement per §9 |
-| `GameEngine.swift` | tie resolution per §7; settlement per §9; elimination once §11.5 is settled |
-| `AIStrategy.swift` | must bluff. Sizing a bet by hand strength makes every AI bet honest and therefore readable, which contradicts §1.3 — bet size carries no information and the engine must never treat it as a proxy for strength |
-
+| `Card.swift` | `Rank`, `Suit`, `Card`, the 52-card `Deck` |
+| `HandEvaluator.swift` | `Combination`, the comparison key, classification |
+| `HandComparator.swift` | the only comparison of two hands, and tie detection |
+| `Hand.swift` | four cards plus their ranking |
+| `Player.swift` | `Seat`, `PlayerID`, `Player`, round standing |
+| `GameRules.swift` | constants, seats, turn order |
+| `Betting.swift` | `BetRange`, legal actions and amounts |
+| `Policy.swift` | every rule §15 leaves open, as configuration |
+| `Sharah.swift` | offers, and the policy knobs §15.1 still owns |
+| `Settlement.swift` | the money, elimination, the target |
+| `GameState.swift` | phases, and what one player may know about another |
+| `GameEngine.swift` | the state machine that sequences all of the above |
+| `AIStrategy.swift` | opponents that decide from public information only |

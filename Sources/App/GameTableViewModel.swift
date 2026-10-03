@@ -4,10 +4,11 @@ import SwiftUI
 /// Drives one table: owns the engine, plays the AI seats, and holds the
 /// presentation state the views animate from.
 ///
-/// The old controller chained `DispatchQueue.main.asyncAfter` calls through
-/// animation completion handlers, which made the round order hard to follow.
-/// Here the round reads top to bottom as `await`s, and the human's turn is
-/// simply where the driver stops and returns.
+/// The round reads top to bottom as `await`s, and the human's turn is simply
+/// where the driver stops and returns. The view model never reaches for a
+/// hidden hand: every hand it reads goes through the engine's
+/// `hand(of:asSeenBy:)`, with the human as the viewer, so a hand it cannot
+/// draw is a hand it does not have.
 @MainActor
 @Observable
 final class GameTableViewModel {
@@ -17,14 +18,14 @@ final class GameTableViewModel {
         /// The AI is acting, cards are flying, or the round is being scored.
         case watching
         case readyToDeal
-        /// Enter the round or withdraw.
+        /// Fold, match, raise or go all-in.
         case choosingAction
-        case pickingBet
-        /// An entrant who is not the top bettor may buy their way out.
-        case offeringToWithdraw
-        /// The top bettor rules on the offers and calls the reveal.
-        case resolvingOffers
+        /// Offer a rival money to leave the round.
+        case offeringSharah
+        /// Someone has offered the human money to leave.
+        case respondingToSharah(SharahOffer)
         case roundOver
+        case gameOver
     }
 
     enum Panel: String, Identifiable, CaseIterable {
@@ -61,7 +62,7 @@ final class GameTableViewModel {
     let humanSeat: Seat
 
     private(set) var interaction: Interaction = .readyToDeal
-    private(set) var outcome: RoundOutcome?
+    private(set) var result: RoundResult?
     private(set) var message: String?
 
     /// Cards dealt to each seat so far, so the deal can stagger.
@@ -76,6 +77,8 @@ final class GameTableViewModel {
     var openPanel: Panel?
 
     private var ai: [Seat: AIStrategy]
+    /// Whether the human has had their turn at offering Sharah this round.
+    private var humanHasNegotiated = false
 
     init(
         players: [Player] = Table.demo,
@@ -86,18 +89,20 @@ final class GameTableViewModel {
         self.engine = GameEngine(players: players, seed: seed)
         self.humanSeat = humanSeat
         self.timing = timing
-        self.ai = Dictionary(uniqueKeysWithValues: Seat.allCases.enumerated().map { index, seat in
+        self.ai = Dictionary(uniqueKeysWithValues: players.enumerated().map { index, player in
             let personality: AIStrategy.Personality
             switch index % 3 {
             case 0: personality = .balanced
             case 1: personality = .cautious
             default: personality = .reckless
             }
-            return (seat, AIStrategy(personality: personality, seed: seed.map { $0 &+ UInt64(index) }))
+            return (player.seat, AIStrategy(personality: personality, seed: seed.map { $0 &+ UInt64(index) }))
         })
     }
 
     // MARK: - Reading the table
+
+    var seats: [Seat] { engine.roster.map(\.seat) }
 
     var humanID: PlayerID? { engine.player(at: humanSeat)?.id }
 
@@ -105,41 +110,77 @@ final class GameTableViewModel {
 
     func player(at seat: Seat) -> Player? { engine.player(at: seat) }
 
+    /// A hand the human is entitled to see: their own, or a revealed one.
     func hand(at seat: Seat) -> Hand? {
-        engine.player(at: seat).flatMap { engine.participation[$0.id]?.hand }
+        guard let humanID, let id = engine.player(at: seat)?.id else { return nil }
+        return engine.hand(of: id, asSeenBy: humanID)
     }
 
     func isTurn(of seat: Seat) -> Bool {
-        if case .betting(let active) = engine.phase { return active == seat }
-        return false
+        guard case .betting(let turn) = engine.phase else { return false }
+        return engine.player(at: seat)?.id == turn
     }
 
     func isTopBettor(_ seat: Seat) -> Bool {
         engine.player(at: seat)?.id == engine.topBettor
     }
 
-    /// Cards are shown face up for the human all round, and for everyone still
-    /// in at the reveal.
+    /// Cards are face up for the human all round, and for everyone still in at
+    /// the reveal.
     func showsFaces(at seat: Seat) -> Bool {
         seat == humanSeat || faceUpSeats.contains(seat)
     }
 
-    var humanBetRange: StakeRange {
+    var canDeal: Bool { engine.canStartRound }
+
+    /// Every ordinary bet the human may make this turn.
+    var humanBetRange: BetRange {
         humanID.map { engine.betRange(for: $0) } ?? .empty
     }
 
-    var humanOfferRange: StakeRange {
-        humanID.map { engine.offerRange(for: $0) } ?? .empty
+    /// Bets to offer in the picker, capped so a large stack cannot fill the
+    /// screen. The all-in button covers the top of the range.
+    var humanBetOptions: [Int] {
+        humanBetRange.options(limit: 40)
     }
 
-    /// Offers the human must rule on, as the top bettor.
-    var offersAwaitingHuman: [Offer] {
-        guard let humanID, engine.topBettor == humanID else { return [] }
-        return engine.offers
+    /// What the human would commit by going all-in, or nil when they have
+    /// nothing left.
+    var humanAllIn: Int? {
+        guard let humanID, let balance = engine.players[humanID]?.balance, balance > 0 else { return nil }
+        return balance
     }
 
-    var winnerName: String? {
-        outcome?.winner.flatMap { engine.players[$0]?.name }
+    func cost(of action: BetAction) -> Int? {
+        guard let humanID, let balance = engine.players[humanID]?.balance else { return nil }
+        return BettingRules.cost(of: action, balance: balance)
+    }
+
+    /// Sharah amounts the human could offer, as a few round fractions of what
+    /// they have free.
+    var humanSharahAmounts: [Int] {
+        guard let humanID else { return [] }
+        let available = engine.availableBalance(of: humanID)
+        guard available > 0 else { return [] }
+        let candidates = [available / 8, available / 4, available / 2, available]
+        return Array(Set(candidates.filter { $0 > 0 })).sorted()
+    }
+
+    /// Who the human's offer would go to. The engine allows any player in the
+    /// round; the table UI aims at the loudest bet, which is a choice of
+    /// interface, not a rule.
+    var sharahTarget: PublicPlayerView? {
+        guard let humanID else { return nil }
+        return engine.publicView(for: humanID).opponentsInRound.max { $0.bet < $1.bet }
+    }
+
+    var winnerNames: [String] {
+        (result?.winners ?? []).compactMap { engine.players[$0]?.name }
+    }
+
+    var gameWinnerName: String? {
+        guard case .gameOver(let winner) = engine.phase else { return nil }
+        return engine.players[winner]?.name
     }
 
     // MARK: - The round
@@ -147,8 +188,9 @@ final class GameTableViewModel {
     /// Shuffles, deals, and hands over to the betting loop.
     func startRound() async {
         do {
-            outcome = nil
+            result = nil
             message = nil
+            humanHasNegotiated = false
             interaction = .watching
 
             withAnimation(.easeIn(duration: 0.25)) {
@@ -160,17 +202,20 @@ final class GameTableViewModel {
 
             try engine.startRound()
 
-            // One card at a time, round the table, twice over — as the old
-            // throwCardAnimation did, minus the recursion.
-            for round in 0..<GameRules.handSize {
-                for seat in engine.turnOrder {
+            // One card at a time, round the table, four times over — the order
+            // the engine itself dealt them in.
+            for pass in 0..<GameRules.handSize {
+                for id in engine.turnOrder {
+                    guard let seat = engine.seat(of: id) else { continue }
                     try? await Task.sleep(for: timing.dealStagger)
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.75)) {
-                        dealtCards[seat] = round + 1
+                        dealtCards[seat] = pass + 1
                     }
                 }
             }
 
+            try engine.finishDealing()
+            try engine.beginBetting()
             await advance()
         } catch {
             report(error)
@@ -180,55 +225,51 @@ final class GameTableViewModel {
     /// Plays every AI turn it can, then stops wherever the human is needed.
     private func advance() async {
         switch engine.phase {
-        case .idle:
+        case .waitingForPlayers, .roundOver:
             interaction = .readyToDeal
 
-        case .betting(let seat) where seat == humanSeat:
-            interaction = humanBetRange.isEmpty ? .watching : .choosingAction
-            // A human with nothing they can afford simply sits the round out.
-            if humanBetRange.isEmpty, let humanID {
-                try? await Task.sleep(for: timing.aiThinking)
-                await fold(humanID, at: humanSeat)
-            }
+        case .dealing, .privateHands:
+            interaction = .watching
 
-        case .betting(let seat):
+        case .betting(let turn) where turn == humanID:
+            interaction = .choosingAction
+
+        case .betting(let turn):
             interaction = .watching
             try? await Task.sleep(for: timing.aiThinking)
-            await playAITurn(at: seat)
+            await playAITurn(for: turn)
 
         case .negotiation:
             await runNegotiation()
 
-        case .reveal(let result):
-            await present(result)
+        case .showdown, .settlement:
+            await finishRound()
+
+        case .gameOver:
+            interaction = .gameOver
         }
     }
 
-    private func playAITurn(at seat: Seat) async {
-        guard let id = engine.player(at: seat)?.id,
-              let hand = engine.participation[id]?.hand
+    private func playAITurn(for id: PlayerID) async {
+        guard let seat = engine.seat(of: id),
+              let hand = engine.hand(of: id, asSeenBy: id),
+              let balance = engine.players[id]?.balance
         else { return }
 
-        switch ai[seat]?.decideBet(hand: hand, range: engine.betRange(for: id)) ?? .withdraw {
-        case .bet(let amount):
-            do {
-                try engine.bet(amount, from: id)
-                show(bet: amount, at: seat)
-                await advance()
-            } catch {
-                report(error)
-            }
-        case .withdraw:
-            await fold(id, at: seat)
-        }
-    }
+        // The AI is handed its own hand and the public table — never the
+        // engine's participation table.
+        let action = ai[seat]?.decideBet(
+            hand: hand,
+            balance: balance,
+            table: engine.publicView(for: id)
+        ) ?? .fold
 
-    private func fold(_ id: PlayerID, at seat: Seat) async {
         do {
-            try engine.withdraw(id)
-            withAnimation(.easeInOut(duration: 0.3)) {
-                foldedSeats.insert(seat)
-                bubbles[seat] = nil
+            let amount = try engine.act(action, by: id)
+            if action == .fold {
+                showFold(at: seat)
+            } else {
+                show(bet: amount, at: seat)
             }
             await advance()
         } catch {
@@ -236,123 +277,136 @@ final class GameTableViewModel {
         }
     }
 
-    /// Collects the AI's offers, then either waits on the human top bettor or
-    /// lets the AI top bettor rule and call the reveal.
+    /// Lets the human offer, collects the AI's offers, then rules on each one.
     private func runNegotiation() async {
         interaction = .watching
 
-        for id in engine.entrants where id != engine.topBettor {
-            guard let seat = engine.seat(of: id), seat != humanSeat else { continue }
-            guard let hand = engine.participation[id]?.hand else { continue }
-            if let amount = ai[seat]?.decideOffer(hand: hand, range: engine.offerRange(for: id)) {
-                try? await Task.sleep(for: timing.offerArrival)
-                try? engine.submitOffer(amount, from: id)
-            }
-        }
-
-        guard let humanID else { return }
-
-        // The top bettor rules on any offers and decides when cards come up,
-        // so the human stops here whether offers arrived or not.
-        if engine.topBettor == humanID {
-            interaction = .resolvingOffers
+        if let humanID,
+           !humanHasNegotiated,
+           engine.standing(of: humanID) == .committed,
+           sharahTarget != nil,
+           !humanSharahAmounts.isEmpty {
+            interaction = .offeringSharah
             return
         }
 
-        if !humanOfferRange.isEmpty {
-            interaction = .offeringToWithdraw
-            return
-        }
-
-        await letAIResolveAndReveal()
+        await collectAIOffers()
+        await resolveOffers()
     }
 
-    private func letAIResolveAndReveal() async {
-        guard let top = engine.topBettor,
-              let seat = engine.seat(of: top),
-              let hand = engine.participation[top]?.hand
-        else { return await endRound() }
-
-        for offer in engine.offers where offer.isPending {
+    private func collectAIOffers() async {
+        for id in engine.playersInRound where id != humanID {
+            guard let seat = engine.seat(of: id),
+                  let hand = engine.hand(of: id, asSeenBy: id)
+            else { continue }
+            let table = engine.publicView(for: id)
+            guard let offer = ai[seat]?.decideSharahOffer(
+                hand: hand,
+                available: engine.availableBalance(of: id),
+                table: table
+            ) else { continue }
             try? await Task.sleep(for: timing.offerArrival)
-            let call = ai[seat]?.decideOfferResolution(hand: hand, offer: offer) ?? .rejected
-            try? engine.resolve(offer: offer.id, as: call, by: top)
+            try? engine.offerSharah(offer.amount, from: id, to: offer.to)
         }
-
-        await endRound()
     }
 
-    /// Closes negotiation and scores the round.
-    func endRound() async {
+    /// Each pending offer is ruled on by whoever received it. The human stops
+    /// the driver; the AI answers for itself.
+    private func resolveOffers() async {
+        while let offer = engine.offers.first(where: \.isPending) {
+            if offer.to == humanID {
+                interaction = .respondingToSharah(offer)
+                return
+            }
+            guard let seat = engine.seat(of: offer.to),
+                  let hand = engine.hand(of: offer.to, asSeenBy: offer.to)
+            else {
+                try? engine.respondToSharah(offer.id, accept: false, by: offer.to)
+                continue
+            }
+            try? await Task.sleep(for: timing.offerArrival)
+            let accepts = ai[seat]?.respondToSharah(
+                offer,
+                hand: hand,
+                bet: engine.bet(of: offer.to),
+                table: engine.publicView(for: offer.to)
+            ) ?? false
+            try? engine.respondToSharah(offer.id, accept: accepts, by: offer.to)
+            if accepts { showFold(at: seat) }
+        }
+
+        await finishRound()
+    }
+
+    /// Turns the cards up, moves the money, checks for a game winner.
+    func finishRound() async {
         interaction = .watching
         try? await Task.sleep(for: timing.beforeReveal)
         do {
-            let result = try engine.endRound()
-            await present(result)
+            if case .negotiation = engine.phase { try engine.closeNegotiation() }
+            if case .showdown = engine.phase { try engine.settle() }
+            let finished = try engine.checkGameEnd()
+            present(finished)
         } catch {
             report(error)
         }
     }
 
-    private func present(_ result: RoundOutcome) async {
-        outcome = result
+    private func present(_ finished: RoundResult) {
+        result = finished
         withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
-            faceUpSeats = Set(result.revealedHands.keys.compactMap { engine.seat(of: $0) })
+            faceUpSeats = Set(finished.revealedHands.keys.compactMap { engine.seat(of: $0) })
         }
-        interaction = .roundOver
+        if case .gameOver = engine.phase {
+            interaction = .gameOver
+        } else {
+            interaction = .roundOver
+        }
     }
 
     // MARK: - Human actions
 
-    func chooseToEnterRound() {
-        interaction = .pickingBet
-    }
-
-    func cancelBetPicker() {
-        interaction = .choosingAction
-    }
-
-    func placeBet(_ amount: Int) async {
+    func take(_ action: BetAction) async {
         guard let humanID else { return }
         do {
-            try engine.bet(amount, from: humanID)
-            show(bet: amount, at: humanSeat)
+            let amount = try engine.act(action, by: humanID)
+            if action == .fold {
+                showFold(at: humanSeat)
+            } else {
+                show(bet: amount, at: humanSeat)
+            }
             await advance()
         } catch {
             report(error)
         }
     }
 
-    func withdrawFromRound() async {
-        guard let humanID else { return }
-        await fold(humanID, at: humanSeat)
-    }
-
-    func sendOffer(_ amount: Int) async {
-        guard let humanID else { return }
+    func offerSharah(_ amount: Int) async {
+        guard let humanID, let target = sharahTarget else { return }
+        humanHasNegotiated = true
         do {
-            try engine.submitOffer(amount, from: humanID)
-            message = "Offered \(amount) to withdraw"
-            await letAIResolveAndReveal()
+            try engine.offerSharah(amount, from: humanID, to: target.id)
+            message = "Offered \(amount) to \(target.name)"
         } catch {
-            report(error)
+            message = "\(error)"
         }
+        await runNegotiation()
     }
 
-    func declineToOffer() async {
-        await letAIResolveAndReveal()
+    func declineToOfferSharah() async {
+        humanHasNegotiated = true
+        await runNegotiation()
     }
 
-    func resolve(_ offer: Offer, as resolution: Offer.Resolution) {
+    func respond(to offer: SharahOffer, accept: Bool) async {
         guard let humanID else { return }
         do {
-            try engine.resolve(offer: offer.id, as: resolution, by: humanID)
-            if resolution == .accepted, let seat = engine.seat(of: offer.sender) {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    foldedSeats.insert(seat)
-                    bubbles[seat] = nil
-                }
+            try engine.respondToSharah(offer.id, accept: accept, by: humanID)
+            if accept {
+                message = "Took \(offer.amount) and left the round"
+                showFold(at: humanSeat)
             }
+            await resolveOffers()
         } catch {
             report(error)
         }
@@ -363,6 +417,13 @@ final class GameTableViewModel {
     private func show(bet amount: Int, at seat: Seat) {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.55)) {
             bubbles[seat] = amount
+        }
+    }
+
+    private func showFold(at seat: Seat) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            foldedSeats.insert(seat)
+            bubbles[seat] = nil
         }
     }
 

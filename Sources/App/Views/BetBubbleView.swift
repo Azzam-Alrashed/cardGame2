@@ -2,8 +2,9 @@ import SwiftUI
 
 /// A seat's bet, in the speech bubble the original art was drawn for.
 struct BetBubbleView: View {
-    let seat: Seat
     let amount: Int
+    /// Art that points toward the seat it belongs to.
+    let imageName: String
 
     var body: some View {
         Text(amount, format: .number)
@@ -13,14 +14,14 @@ struct BetBubbleView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
             .background {
-                Image(seat.bubbleImageName)
+                Image(imageName)
                     .resizable(capInsets: EdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12))
             }
             .transition(.scale(scale: 0.4).combined(with: .opacity))
     }
 }
 
-/// The player's avatar, name and purse.
+/// The player's avatar, name and balance.
 struct PlayerBadgeView: View {
     let player: Player
     var isActive: Bool = false
@@ -36,6 +37,7 @@ struct PlayerBadgeView: View {
                 .overlay {
                     Circle().strokeBorder(isActive ? .yellow : .white.opacity(0.35), lineWidth: isActive ? 2.5 : 1)
                 }
+                .grayscale(player.isEliminated ? 1 : 0)
 
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
@@ -47,7 +49,7 @@ struct PlayerBadgeView: View {
                             .foregroundStyle(.yellow)
                     }
                 }
-                Text(player.coins, format: .number)
+                Text(player.isEliminated ? "Out" : player.balance.formatted())
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.75))
@@ -61,17 +63,5 @@ struct PlayerBadgeView: View {
             Capsule().strokeBorder(.white.opacity(isActive ? 0.5 : 0.12), lineWidth: 1)
         }
         .animation(.easeInOut(duration: 0.2), value: isActive)
-    }
-}
-
-extension Seat {
-    /// The bubble art points toward its own player.
-    var bubbleImageName: String {
-        switch self {
-        case .south: return "downBubble"
-        case .east: return "rightBubble"
-        case .north: return "upBubble"
-        case .west: return "leftBubble"
-        }
     }
 }
